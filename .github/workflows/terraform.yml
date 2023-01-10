@@ -1,0 +1,234 @@
+name: 'Terraform'
+
+on:
+  push:
+    branches:
+    - "main"
+  pull_request:
+
+
+
+permissions:
+  contents: read
+
+env:
+  TF_FOLDER: folder-01
+  TF_FOLDER_2: folder-01/modules/gke
+  TF_FOLDER_3: modules/gke
+  TF_GLOBAL_VARS_FILE: global-env.tfvars
+  TF_DIAGRAM: diagram.py
+  TF_DIAGRAM_NAME: exposed_pod_with_2_replicas.png 
+
+  TF_GS: diagram-0001-public
+  TF_PROJECT: x
+  TF_WAF_POLICY: my-policy
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Public IP
+      id: ip
+      uses: haythem/public-ip@v1.3
+
+    - name: Print Public IP
+      run: |
+        echo ${{ steps.ip.outputs.ipv4 }}
+        echo ${{ steps.ip.outputs.ipv6 }}
+
+
+
+
+
+  terraform:
+    name: 'Terraform'
+    runs-on: ubuntu-latest
+    environment: production
+
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+      
+    - name: Google Auth
+      id: auth
+      uses: 'google-github-actions/auth@v0'
+      with:
+        credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+        create_credentials_file: true
+        export_environment_variables: true
+        cleanup_credentials: true
+
+    - name: Set up Cloud SDK
+      uses: 'google-github-actions/setup-gcloud@v0'
+
+    - name: Setup Terraform
+      id: setup_terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: 1.3.6
+        terraform_wrapper: false
+      env:
+        TF_IN_AUTOMATION: true
+
+    - name: Terraform Init
+      id: terraform_init
+      run: |
+        cd ${{ env.TF_FOLDER }} && \
+        terraform init
+        
+  # Checks that all Terraform configuration files adhere to a canonical format
+    # - name: Terraform Format
+    #   run: terraform fmt -check
+  
+    - name: Terraform Plan
+      id: terraform_plan
+      run: |
+        cd ${{ env.TF_FOLDER }} && \
+        terraform plan -var-file=${{ env.TF_GLOBAL_VARS_FILE }}
+        
+    - name: Terraform Apply
+      if: ${{ true }}
+      id: terraform_apply
+      run: |
+        cd ${{ env.TF_FOLDER }} && \
+        terraform apply -auto-approve -var-file=${{ env.TF_GLOBAL_VARS_FILE }}
+
+      
+  gke:
+    needs: terraform
+    name: 'GKE'
+    runs-on: ubuntu-latest
+    environment: production
+
+    # Use the Bash shell regardless whether the GitHub Actions runner is ubuntu-latest, macos-latest, or windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Checkout
+      uses: actions/checkout@v3
+      
+    - name: Google Auth
+      id: auth
+      uses: 'google-github-actions/auth@v0'
+      with:
+        credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+        create_credentials_file: true
+        export_environment_variables: true
+        cleanup_credentials: true
+
+    - name: Set up Cloud SDK
+      uses: 'google-github-actions/setup-gcloud@v0'
+
+    - name: Setup Terraform
+      id: setup_terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: 1.3.6
+        terraform_wrapper: false
+      env:
+        TF_IN_AUTOMATION: true
+
+    - name: Terraform Init
+      id: terraform_init
+      run: |
+        cd ${{ env.TF_FOLDER_2 }} && \
+        terraform init
+        
+  # Checks that all Terraform configuration files adhere to a canonical format
+    # - name: Terraform Format
+    #   run: terraform fmt -check
+
+    #terraform plan -input=false
+    #terraform apply -auto-approve -input=false
+  
+
+
+
+    # - name: Terraform Plan
+    #   id: terraform_plan
+    #   run: |
+    #     cd ${{ env.TF_FOLDER_2 }} && \
+    #     terraform plan -input=false
+        
+    # - name: Terraform Apply
+    #   if: ${{ true }}
+    #   id: terraform_apply
+    #   run: |
+    #     cd ${{ env.TF_FOLDER_2 }} && \
+    #     terraform apply -auto-approve -input=false
+
+    - name: Terraform Plan
+      id: terraform_plan
+      run: |
+        cd ${{ env.TF_FOLDER }} && \
+        terraform -chdir=${{ env.TF_FOLDER_3 }} plan -var-file=$(realpath ../${{ env.TF_FOLDER }}/${{ env.TF_GLOBAL_VARS_FILE }})
+        
+    - name: Terraform Apply
+      if: ${{ true }}
+      id: terraform_apply
+      run: |
+        cd ${{ env.TF_FOLDER }} && \
+        terraform -chdir=${{ env.TF_FOLDER_3 }} apply -auto-approve -var-file=$(realpath ../${{ env.TF_FOLDER }}/${{ env.TF_GLOBAL_VARS_FILE }})
+
+
+  waf:
+    needs: gke
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v0'
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          create_credentials_file: true
+          #export_environment_variables: true
+          cleanup_credentials: true
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v0'
+
+      - name: Check BCK
+        run: |
+          export BCK=$(gcloud compute backend-services list --project=${{ env.TF_PROJECT }} --filter NAME --format='value(NAME)') && \
+          echo $BCK && \
+          gcloud compute backend-services update $BCK --security-policy ${{ env.TF_WAF_POLICY }} --project ${{ env.TF_PROJECT }} --global
+
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install diagrams
+        run: pip install diagrams
+
+      - name: install graph
+        run: sudo apt install graphviz
+
+      - name: run py
+        run: python ./${{ env.TF_FOLDER }}/${{ env.TF_DIAGRAM }}  
+
+      - name: run cp
+        run: gsutil cp ${{ env.TF_DIAGRAM_NAME }} gs://${{ env.TF_GS }}
+          
+
+
+          
